@@ -1,0 +1,465 @@
+import {
+  App, Plugin, PluginSettingTab, Setting, ItemView, WorkspaceLeaf,
+  Notice, TFile, TFolder, TAbstractFile, FileSystemAdapter,
+} from "obsidian";
+import * as fs from "fs";
+import * as path from "path";
+import { execFile } from "child_process";
+
+const VIEW_TYPE = "quartz-publisher-view";
+
+interface QuartzPublisherSettings {
+  quartzPath: string;
+  branch: string;
+  siteUrl: string;
+  published: string[];
+  lastDeployedAt: number | null;
+  history: HistoryEntry[];
+}
+
+interface HistoryEntry {
+  ts: number;
+  count: number;
+  ok: boolean;
+  message: string;
+}
+
+const DEFAULTS: QuartzPublisherSettings = {
+  quartzPath: "/Users/dunet/quartz-site",
+  branch: "v4",
+  siteUrl: "https://thelyver.github.io/quartz-site/",
+  published: [],
+  lastDeployedAt: null,
+  history: [],
+};
+
+export default class QuartzPublisherPlugin extends Plugin {
+  settings: QuartzPublisherSettings;
+  decorateTimer: number | null = null;
+
+  async onload() {
+    await this.loadSettings();
+
+    this.registerView(VIEW_TYPE, (leaf) => new PublisherView(leaf, this));
+
+    this.addRibbonIcon("upload-cloud", "Quartz Publisher", () => this.activateView());
+
+    this.addCommand({
+      id: "open-publisher",
+      name: "게시 패널 열기",
+      callback: () => this.activateView(),
+    });
+
+    this.addCommand({
+      id: "deploy-now",
+      name: "지금 배포",
+      callback: () => this.deploy(),
+    });
+
+    this.addCommand({
+      id: "toggle-publish-current",
+      name: "현재 파일 게시 토글",
+      checkCallback: (checking) => {
+        const f = this.app.workspace.getActiveFile();
+        if (!f) return false;
+        if (!checking) this.togglePath(f.path);
+        return true;
+      },
+    });
+
+    this.addCommand({
+      id: "open-quartz-folder",
+      name: "Quartz 폴더 열기 (Finder)",
+      callback: () => this.openQuartzFolder(),
+    });
+
+    this.registerEvent(
+      this.app.workspace.on("file-menu", (menu, abstractFile) => {
+        const isFolder = abstractFile instanceof TFolder;
+        const isPublished = this.settings.published.includes(abstractFile.path);
+
+        menu.addItem((item) => {
+          item
+            .setTitle(isPublished ? "🌐 게시 해제" : "🌐 웹에 게시")
+            .setIcon("upload-cloud")
+            .onClick(() => this.togglePath(abstractFile.path));
+        });
+
+        if (isFolder) {
+          menu.addItem((item) => {
+            item
+              .setTitle("🌐 폴더 내 모든 파일 개별 게시")
+              .setIcon("files")
+              .onClick(() => this.publishAllInFolder(abstractFile as TFolder));
+          });
+          menu.addItem((item) => {
+            item
+              .setTitle("🌐 폴더 내 모두 해제")
+              .setIcon("x")
+              .onClick(() => this.unpublishAllInFolder(abstractFile as TFolder));
+          });
+        }
+      })
+    );
+
+    this.registerEvent(this.app.workspace.on("layout-change", () => this.scheduleDecorate()));
+    this.registerEvent(this.app.vault.on("create", () => this.scheduleDecorate()));
+    this.registerEvent(this.app.vault.on("rename", () => this.scheduleDecorate()));
+    this.registerEvent(this.app.vault.on("delete", () => this.scheduleDecorate()));
+    this.app.workspace.onLayoutReady(() => this.scheduleDecorate());
+
+    this.addSettingTab(new SettingsTab(this.app, this));
+  }
+
+  onunload() {
+    this.clearDecorations();
+  }
+
+  async loadSettings() {
+    this.settings = Object.assign({}, DEFAULTS, await this.loadData());
+  }
+
+  async saveSettings() {
+    await this.saveData(this.settings);
+    this.scheduleDecorate();
+    this.refreshView();
+  }
+
+  isPathPublished(p: string): boolean {
+    return this.settings.published.includes(p);
+  }
+
+  async togglePath(p: string) {
+    if (this.settings.published.includes(p)) {
+      this.settings.published = this.settings.published.filter((x) => x !== p);
+      new Notice(`해제: ${p}`);
+    } else {
+      this.settings.published.push(p);
+      new Notice(`게시 추가: ${p}`);
+    }
+    await this.saveSettings();
+  }
+
+  async publishAllInFolder(folder: TFolder) {
+    const files: string[] = [];
+    const collect = (f: TFolder) => {
+      for (const child of f.children) {
+        if (child instanceof TFile) files.push(child.path);
+        else if (child instanceof TFolder) collect(child);
+      }
+    };
+    collect(folder);
+    let added = 0;
+    for (const f of files) {
+      if (!this.settings.published.includes(f)) {
+        this.settings.published.push(f);
+        added++;
+      }
+    }
+    new Notice(`${added}개 파일 게시 추가됨`);
+    await this.saveSettings();
+  }
+
+  async unpublishAllInFolder(folder: TFolder) {
+    const prefix = folder.path === "/" ? "" : folder.path + "/";
+    const before = this.settings.published.length;
+    this.settings.published = this.settings.published.filter(
+      (p) => p !== folder.path && !p.startsWith(prefix)
+    );
+    new Notice(`${before - this.settings.published.length}개 항목 해제`);
+    await this.saveSettings();
+  }
+
+  async activateView() {
+    const { workspace } = this.app;
+    let leaf = workspace.getLeavesOfType(VIEW_TYPE)[0];
+    if (!leaf) {
+      const right = workspace.getRightLeaf(false);
+      if (!right) return;
+      leaf = right;
+      await leaf.setViewState({ type: VIEW_TYPE, active: true });
+    }
+    workspace.revealLeaf(leaf);
+  }
+
+  refreshView() {
+    this.app.workspace.getLeavesOfType(VIEW_TYPE).forEach((leaf) => {
+      const v = leaf.view as PublisherView;
+      if (v && v.render) v.render();
+    });
+  }
+
+  scheduleDecorate() {
+    if (this.decorateTimer) window.clearTimeout(this.decorateTimer);
+    this.decorateTimer = window.setTimeout(() => this.refreshDecorations(), 100);
+  }
+
+  refreshDecorations() {
+    this.clearDecorations();
+    const explorers = this.app.workspace.getLeavesOfType("file-explorer");
+    if (!explorers.length) return;
+    const root = (explorers[0].view as any).containerEl as HTMLElement;
+    if (!root) return;
+
+    for (const p of this.settings.published) {
+      const items = root.querySelectorAll(`[data-path="${cssEscape(p)}"]`);
+      items.forEach((el) => el.classList.add("quartz-published"));
+    }
+  }
+
+  clearDecorations() {
+    document.querySelectorAll(".quartz-published").forEach((el) =>
+      el.classList.remove("quartz-published")
+    );
+  }
+
+  getVaultBasePath(): string {
+    const a = this.app.vault.adapter;
+    if (a instanceof FileSystemAdapter) return a.getBasePath();
+    throw new Error("Desktop only");
+  }
+
+  openQuartzFolder() {
+    execFile("open", [this.settings.quartzPath], (err) => {
+      if (err) new Notice(`폴더 열기 실패: ${err.message}`);
+    });
+  }
+
+  async syncContent(): Promise<number> {
+    const contentDir = path.join(this.settings.quartzPath, "content");
+    if (!fs.existsSync(contentDir)) {
+      throw new Error(`content 폴더 없음: ${contentDir}`);
+    }
+
+    for (const entry of fs.readdirSync(contentDir)) {
+      if (entry === "index.md" || entry === ".gitkeep") continue;
+      fs.rmSync(path.join(contentDir, entry), { recursive: true, force: true });
+    }
+
+    const vaultBase = this.getVaultBasePath();
+    let copied = 0;
+
+    for (const relPath of this.settings.published) {
+      const src = path.join(vaultBase, relPath);
+      const dst = path.join(contentDir, relPath);
+      if (!fs.existsSync(src)) continue;
+
+      fs.mkdirSync(path.dirname(dst), { recursive: true });
+      const stat = fs.statSync(src);
+      if (stat.isDirectory()) {
+        copyDirRecursive(src, dst);
+      } else {
+        fs.copyFileSync(src, dst);
+      }
+      copied++;
+    }
+    return copied;
+  }
+
+  async deploy() {
+    if (this.settings.published.length === 0) {
+      new Notice("게시할 항목이 없습니다.");
+      return;
+    }
+
+    const notice = new Notice("🔄 동기화 중...", 0);
+    let copied = 0;
+
+    try {
+      copied = await this.syncContent();
+      notice.setMessage(`📦 ${copied}개 동기화 완료. Git 커밋/푸시 중...`);
+
+      const cwd = this.settings.quartzPath;
+      await runShell("git", ["add", "-A"], cwd);
+
+      const hasChanges = await runShell("git", ["diff", "--cached", "--quiet"], cwd)
+        .then(() => false)
+        .catch(() => true);
+
+      if (!hasChanges) {
+        notice.hide();
+        new Notice("변경 사항 없음.");
+        return;
+      }
+
+      const ts = new Date().toISOString().slice(0, 16).replace("T", " ");
+      await runShell("git", ["commit", "-m", `Update notes ${ts}`], cwd);
+      await runShell("git", ["push", "origin", `HEAD:${this.settings.branch}`], cwd);
+
+      this.settings.lastDeployedAt = Date.now();
+      this.settings.history.unshift({
+        ts: Date.now(),
+        count: copied,
+        ok: true,
+        message: `${copied}개 항목 배포`,
+      });
+      this.settings.history = this.settings.history.slice(0, 20);
+      await this.saveSettings();
+
+      notice.hide();
+      new Notice("✅ 배포 완료! 2~3분 후 사이트에 반영됩니다.", 6000);
+    } catch (e: any) {
+      this.settings.history.unshift({
+        ts: Date.now(),
+        count: copied,
+        ok: false,
+        message: e.message || String(e),
+      });
+      this.settings.history = this.settings.history.slice(0, 20);
+      await this.saveSettings();
+      notice.hide();
+      new Notice(`❌ 배포 실패: ${e.message || e}`, 8000);
+      console.error("[Quartz Publisher]", e);
+    }
+  }
+}
+
+class PublisherView extends ItemView {
+  plugin: QuartzPublisherPlugin;
+
+  constructor(leaf: WorkspaceLeaf, plugin: QuartzPublisherPlugin) {
+    super(leaf);
+    this.plugin = plugin;
+  }
+
+  getViewType() { return VIEW_TYPE; }
+  getDisplayText() { return "Quartz Publisher"; }
+  getIcon() { return "upload-cloud"; }
+
+  async onOpen() { this.render(); }
+
+  render() {
+    const c = this.containerEl.children[1] as HTMLElement;
+    c.empty();
+    c.addClass("quartz-publisher-view");
+
+    c.createEl("h3", { text: "🌐 Quartz Publisher" });
+
+    const urlSec = c.createEl("div", { cls: "qp-section" });
+    urlSec.createEl("div", { text: "사이트 URL", cls: "qp-label" });
+    urlSec.createEl("a", {
+      text: this.plugin.settings.siteUrl,
+      href: this.plugin.settings.siteUrl,
+      cls: "qp-link",
+    });
+
+    if (this.plugin.settings.lastDeployedAt) {
+      const dt = new Date(this.plugin.settings.lastDeployedAt);
+      c.createEl("div", { text: `최근 배포: ${dt.toLocaleString()}`, cls: "qp-meta" });
+    }
+
+    const list = c.createEl("div", { cls: "qp-section" });
+    list.createEl("h4", {
+      text: `게시 항목 (${this.plugin.settings.published.length})`,
+    });
+
+    if (this.plugin.settings.published.length === 0) {
+      list.createEl("div", {
+        text: '없음. 파일 탐색기에서 우클릭 → "🌐 웹에 게시"',
+        cls: "qp-empty",
+      });
+    } else {
+      const ul = list.createEl("ul", { cls: "qp-list" });
+      for (const p of this.plugin.settings.published) {
+        const li = ul.createEl("li");
+        const isFolder = !p.includes(".") || this.app.vault.getAbstractFileByPath(p) instanceof TFolder;
+        li.createEl("span", { text: isFolder ? "📁" : "📄", cls: "qp-icon" });
+        li.createEl("span", { text: p, cls: "qp-path" });
+        const btn = li.createEl("button", { text: "✕", cls: "qp-remove" });
+        btn.onclick = () => this.plugin.togglePath(p);
+      }
+    }
+
+    const deployBtn = c.createEl("button", { text: "🚀 지금 배포", cls: "qp-deploy" });
+    deployBtn.onclick = () => this.plugin.deploy();
+
+    const folderBtn = c.createEl("button", {
+      text: "📁 Quartz 폴더 열기",
+      cls: "qp-secondary",
+    });
+    folderBtn.onclick = () => this.plugin.openQuartzFolder();
+
+    if (this.plugin.settings.history.length > 0) {
+      c.createEl("h4", { text: "최근 이력" });
+      const hist = c.createEl("ul", { cls: "qp-list" });
+      for (const h of this.plugin.settings.history.slice(0, 5)) {
+        const li = hist.createEl("li");
+        const dt = new Date(h.ts);
+        const icon = h.ok ? "✅" : "❌";
+        li.createEl("span", { text: icon, cls: "qp-icon" });
+        li.createEl("span", {
+          text: `${dt.toLocaleString()} · ${h.message}`,
+          cls: "qp-path",
+        });
+      }
+    }
+  }
+}
+
+class SettingsTab extends PluginSettingTab {
+  plugin: QuartzPublisherPlugin;
+  constructor(app: App, plugin: QuartzPublisherPlugin) {
+    super(app, plugin);
+    this.plugin = plugin;
+  }
+
+  display() {
+    const { containerEl } = this;
+    containerEl.empty();
+    containerEl.createEl("h2", { text: "Quartz Publisher" });
+
+    new Setting(containerEl)
+      .setName("Quartz 사이트 경로")
+      .setDesc("quartz-site 폴더의 절대 경로 (예: /Users/dunet/quartz-site)")
+      .addText((t) =>
+        t.setValue(this.plugin.settings.quartzPath).onChange(async (v) => {
+          this.plugin.settings.quartzPath = v.trim();
+          await this.plugin.saveSettings();
+        })
+      );
+
+    new Setting(containerEl)
+      .setName("Git 브랜치")
+      .setDesc("배포 대상 브랜치 (Quartz 기본: v4)")
+      .addText((t) =>
+        t.setValue(this.plugin.settings.branch).onChange(async (v) => {
+          this.plugin.settings.branch = v.trim() || "v4";
+          await this.plugin.saveSettings();
+        })
+      );
+
+    new Setting(containerEl)
+      .setName("사이트 URL")
+      .setDesc("배포된 GitHub Pages URL")
+      .addText((t) =>
+        t.setValue(this.plugin.settings.siteUrl).onChange(async (v) => {
+          this.plugin.settings.siteUrl = v.trim();
+          await this.plugin.saveSettings();
+        })
+      );
+  }
+}
+
+function copyDirRecursive(src: string, dst: string) {
+  fs.mkdirSync(dst, { recursive: true });
+  for (const entry of fs.readdirSync(src)) {
+    const s = path.join(src, entry);
+    const d = path.join(dst, entry);
+    const stat = fs.statSync(s);
+    if (stat.isDirectory()) copyDirRecursive(s, d);
+    else fs.copyFileSync(s, d);
+  }
+}
+
+function runShell(cmd: string, args: string[], cwd: string): Promise<string> {
+  return new Promise((resolve, reject) => {
+    execFile(cmd, args, { cwd, maxBuffer: 1024 * 1024 * 10 }, (err, stdout, stderr) => {
+      if (err) reject(new Error(stderr?.toString() || err.message));
+      else resolve(stdout?.toString() || "");
+    });
+  });
+}
+
+function cssEscape(s: string): string {
+  return s.replace(/["\\]/g, "\\$&");
+}

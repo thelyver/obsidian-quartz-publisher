@@ -1,0 +1,26 @@
+.quartz-publisher-view { padding: 12px; font-size: 13px; }
+.quartz-publisher-view h3 { margin: 0 0 8px 0; }
+.quartz-publisher-view h4 { margin: 12px 0 6px 0; font-size: 12px; opacity: .8; text-transform: uppercase; letter-spacing: .5px; }
+.quartz-publisher-view .qp-section { margin: 10px 0; }
+.quartz-publisher-view .qp-label { font-size: .8em; color: var(--text-muted); margin-bottom: 2px; }
+.quartz-publisher-view .qp-link { word-break: break-all; font-size: .85em; color: var(--text-accent); }
+.quartz-publisher-view .qp-meta { font-size: .75em; color: var(--text-muted); margin: 6px 0; }
+.quartz-publisher-view .qp-empty { color: var(--text-muted); font-size: .85em; font-style: italic; padding: 8px; text-align: center; }
+.quartz-publisher-view .qp-list { list-style: none; padding: 0; margin: 6px 0; max-height: 320px; overflow-y: auto; }
+.quartz-publisher-view .qp-list li { display: flex; align-items: center; padding: 5px 8px; border-radius: 4px; background: var(--background-secondary); margin-bottom: 3px; gap: 6px; }
+.quartz-publisher-view .qp-path { flex: 1; font-size: .8em; word-break: break-all; }
+.quartz-publisher-view .qp-icon { font-size: .85em; opacity: .7; }
+.quartz-publisher-view .qp-remove { background: transparent; border: none; color: var(--text-muted); cursor: pointer; padding: 2px 6px; font-size: .9em; }
+.quartz-publisher-view .qp-remove:hover { color: var(--text-error); }
+.quartz-publisher-view .qp-deploy { width: 100%; padding: 10px; background: var(--interactive-accent); color: var(--text-on-accent); border: none; border-radius: 6px; cursor: pointer; font-weight: bold; margin-top: 12px; font-size: 14px; }
+.quartz-publisher-view .qp-deploy:hover { background: var(--interactive-accent-hover); }
+.quartz-publisher-view .qp-deploy:disabled { opacity: .5; cursor: not-allowed; }
+.quartz-publisher-view .qp-secondary { width: 100%; padding: 6px; background: var(--background-modifier-border); color: var(--text-normal); border: none; border-radius: 4px; cursor: pointer; margin-top: 6px; font-size: 12px; }
+.quartz-publisher-view .qp-secondary:hover { background: var(--background-modifier-hover); }
+
+.nav-file-title.quartz-published .nav-file-title-content::after,
+.nav-folder-title.quartz-published .nav-folder-title-content::after {
+  content: " 🌐";
+  font-size: .85em;
+  opacity: .8;
+}
