@@ -1,6 +1,6 @@
 import {
   App, Plugin, PluginSettingTab, Setting, ItemView, WorkspaceLeaf,
-  Notice, TFile, TFolder, TAbstractFile, FileSystemAdapter,
+  Notice, TFile, TFolder, FileSystemAdapter,
 } from "obsidian";
 import * as fs from "fs";
 import * as path from "path";
@@ -15,6 +15,9 @@ interface QuartzPublisherSettings {
   published: string[];
   lastDeployedAt: number | null;
   history: HistoryEntry[];
+  autoMermaid: boolean;
+  autoEmbeds: boolean;
+  autoIndex: boolean;
 }
 
 interface HistoryEntry {
@@ -31,7 +34,12 @@ const DEFAULTS: QuartzPublisherSettings = {
   published: [],
   lastDeployedAt: null,
   history: [],
+  autoMermaid: true,
+  autoEmbeds: true,
+  autoIndex: true,
 };
+
+const MERMAID_KEYWORDS = /^\s*(graph|flowchart|sequenceDiagram|classDiagram|stateDiagram|erDiagram|gantt|pie|journey|gitGraph|mindmap|timeline|quadrantChart|requirementDiagram|C4Context|C4Container|C4Component|sankey|xychart)/;
 
 export default class QuartzPublisherPlugin extends Plugin {
   settings: QuartzPublisherSettings;
@@ -41,21 +49,10 @@ export default class QuartzPublisherPlugin extends Plugin {
     await this.loadSettings();
 
     this.registerView(VIEW_TYPE, (leaf) => new PublisherView(leaf, this));
-
     this.addRibbonIcon("upload-cloud", "Quartz Publisher", () => this.activateView());
 
-    this.addCommand({
-      id: "open-publisher",
-      name: "게시 패널 열기",
-      callback: () => this.activateView(),
-    });
-
-    this.addCommand({
-      id: "deploy-now",
-      name: "지금 배포",
-      callback: () => this.deploy(),
-    });
-
+    this.addCommand({ id: "open-publisher", name: "게시 패널 열기", callback: () => this.activateView() });
+    this.addCommand({ id: "deploy-now", name: "지금 배포", callback: () => this.deploy() });
     this.addCommand({
       id: "toggle-publish-current",
       name: "현재 파일 게시 토글",
@@ -66,12 +63,7 @@ export default class QuartzPublisherPlugin extends Plugin {
         return true;
       },
     });
-
-    this.addCommand({
-      id: "open-quartz-folder",
-      name: "Quartz 폴더 열기 (Finder)",
-      callback: () => this.openQuartzFolder(),
-    });
+    this.addCommand({ id: "open-quartz-folder", name: "Quartz 폴더 열기 (Finder)", callback: () => this.openQuartzFolder() });
 
     this.registerEvent(
       this.app.workspace.on("file-menu", (menu, abstractFile) => {
@@ -111,23 +103,10 @@ export default class QuartzPublisherPlugin extends Plugin {
     this.addSettingTab(new SettingsTab(this.app, this));
   }
 
-  onunload() {
-    this.clearDecorations();
-  }
+  onunload() { this.clearDecorations(); }
 
-  async loadSettings() {
-    this.settings = Object.assign({}, DEFAULTS, await this.loadData());
-  }
-
-  async saveSettings() {
-    await this.saveData(this.settings);
-    this.scheduleDecorate();
-    this.refreshView();
-  }
-
-  isPathPublished(p: string): boolean {
-    return this.settings.published.includes(p);
-  }
+  async loadSettings() { this.settings = Object.assign({}, DEFAULTS, await this.loadData()); }
+  async saveSettings() { await this.saveData(this.settings); this.scheduleDecorate(); this.refreshView(); }
 
   async togglePath(p: string) {
     if (this.settings.published.includes(p)) {
@@ -163,9 +142,7 @@ export default class QuartzPublisherPlugin extends Plugin {
   async unpublishAllInFolder(folder: TFolder) {
     const prefix = folder.path === "/" ? "" : folder.path + "/";
     const before = this.settings.published.length;
-    this.settings.published = this.settings.published.filter(
-      (p) => p !== folder.path && !p.startsWith(prefix)
-    );
+    this.settings.published = this.settings.published.filter((p) => p !== folder.path && !p.startsWith(prefix));
     new Notice(`${before - this.settings.published.length}개 항목 해제`);
     await this.saveSettings();
   }
@@ -200,7 +177,6 @@ export default class QuartzPublisherPlugin extends Plugin {
     if (!explorers.length) return;
     const root = (explorers[0].view as any).containerEl as HTMLElement;
     if (!root) return;
-
     for (const p of this.settings.published) {
       const items = root.querySelectorAll(`[data-path="${cssEscape(p)}"]`);
       items.forEach((el) => el.classList.add("quartz-published"));
@@ -208,9 +184,7 @@ export default class QuartzPublisherPlugin extends Plugin {
   }
 
   clearDecorations() {
-    document.querySelectorAll(".quartz-published").forEach((el) =>
-      el.classList.remove("quartz-published")
-    );
+    document.querySelectorAll(".quartz-published").forEach((el) => el.classList.remove("quartz-published"));
   }
 
   getVaultBasePath(): string {
@@ -225,6 +199,13 @@ export default class QuartzPublisherPlugin extends Plugin {
     });
   }
 
+  buildUrl(p: string): string {
+    const slug = p.replace(/\.md$/i, "").replace(/ /g, "-");
+    const base = this.settings.siteUrl.replace(/\/$/, "");
+    const encoded = slug.split("/").map(encodeURIComponent).join("/");
+    return `${base}/${encoded}`;
+  }
+
   async syncContent(): Promise<number> {
     const contentDir = path.join(this.settings.quartzPath, "content");
     if (!fs.existsSync(contentDir)) {
@@ -232,11 +213,12 @@ export default class QuartzPublisherPlugin extends Plugin {
     }
 
     for (const entry of fs.readdirSync(contentDir)) {
-      if (entry === "index.md" || entry === ".gitkeep") continue;
+      if (entry === ".gitkeep") continue;
       fs.rmSync(path.join(contentDir, entry), { recursive: true, force: true });
     }
 
     const vaultBase = this.getVaultBasePath();
+    const copiedAttachments = new Set<string>();
     let copied = 0;
 
     for (const relPath of this.settings.published) {
@@ -246,14 +228,116 @@ export default class QuartzPublisherPlugin extends Plugin {
 
       fs.mkdirSync(path.dirname(dst), { recursive: true });
       const stat = fs.statSync(src);
+
       if (stat.isDirectory()) {
-        copyDirRecursive(src, dst);
+        this.copyDirRecursive(src, dst);
       } else {
-        fs.copyFileSync(src, dst);
+        this.copyFileTransformed(src, dst);
+        if (this.settings.autoEmbeds && relPath.toLowerCase().endsWith(".md")) {
+          await this.copyEmbedsForFile(relPath, vaultBase, contentDir, copiedAttachments);
+        }
       }
       copied++;
     }
+
+    if (this.settings.autoIndex) {
+      this.writeIndexMd(contentDir);
+    }
+
     return copied;
+  }
+
+  copyFileTransformed(src: string, dst: string) {
+    if (this.settings.autoMermaid && src.toLowerCase().endsWith(".md")) {
+      const content = fs.readFileSync(src, "utf-8");
+      const transformed = autoTagMermaid(content);
+      fs.writeFileSync(dst, transformed, "utf-8");
+    } else {
+      fs.copyFileSync(src, dst);
+    }
+  }
+
+  copyDirRecursive(src: string, dst: string) {
+    fs.mkdirSync(dst, { recursive: true });
+    for (const entry of fs.readdirSync(src)) {
+      const s = path.join(src, entry);
+      const d = path.join(dst, entry);
+      const stat = fs.statSync(s);
+      if (stat.isDirectory()) this.copyDirRecursive(s, d);
+      else this.copyFileTransformed(s, d);
+    }
+  }
+
+  async copyEmbedsForFile(vaultRel: string, vaultBase: string, contentDir: string, copied: Set<string>) {
+    const file = this.app.vault.getAbstractFileByPath(vaultRel);
+    if (!(file instanceof TFile)) return;
+    const cache = this.app.metadataCache.getFileCache(file);
+    const refs: string[] = [];
+    if (cache?.embeds) refs.push(...cache.embeds.map((e) => e.link));
+    if (cache?.links) refs.push(...cache.links.map((l) => l.link));
+
+    for (const ref of refs) {
+      const cleanRef = ref.split("#")[0].split("|")[0].trim();
+      if (!cleanRef) continue;
+      const resolved = this.app.metadataCache.getFirstLinkpathDest(cleanRef, vaultRel);
+      if (!resolved) continue;
+      if (copied.has(resolved.path)) continue;
+      if (this.settings.published.includes(resolved.path)) continue;
+
+      const src = path.join(vaultBase, resolved.path);
+      const dst = path.join(contentDir, resolved.path);
+      if (!fs.existsSync(src)) continue;
+
+      fs.mkdirSync(path.dirname(dst), { recursive: true });
+      this.copyFileTransformed(src, dst);
+      copied.add(resolved.path);
+    }
+  }
+
+  writeIndexMd(contentDir: string) {
+    const grouped: Record<string, string[]> = {};
+    const folders: string[] = [];
+
+    for (const p of this.settings.published) {
+      const af = this.app.vault.getAbstractFileByPath(p);
+      if (af instanceof TFolder) {
+        folders.push(p);
+      } else if (p.toLowerCase().endsWith(".md")) {
+        const top = p.split("/")[0] || "기타";
+        if (!grouped[top]) grouped[top] = [];
+        grouped[top].push(p);
+      }
+    }
+
+    let md = `---\ntitle: Sylver Notes\n---\n\n# Sylver Notes\n\n`;
+
+    if (this.settings.published.length === 0) {
+      md += `현재 게시된 항목이 없습니다.\n`;
+    } else {
+      md += `총 **${this.settings.published.length}개** 항목 게시됨.\n\n`;
+
+      if (folders.length > 0) {
+        md += `## 📂 게시 폴더\n\n`;
+        for (const f of folders.sort()) {
+          const display = path.basename(f);
+          md += `- [${display}](${encodeURI(f)}/)\n`;
+        }
+        md += `\n`;
+      }
+
+      const sortedTops = Object.keys(grouped).sort();
+      for (const top of sortedTops) {
+        md += `## 📁 ${top}\n\n`;
+        for (const p of grouped[top].sort()) {
+          const noExt = p.replace(/\.md$/i, "");
+          const displayName = path.basename(noExt);
+          md += `- [[${noExt}|${displayName}]]\n`;
+        }
+        md += `\n`;
+      }
+    }
+
+    fs.writeFileSync(path.join(contentDir, "index.md"), md, "utf-8");
   }
 
   async deploy() {
@@ -287,24 +371,14 @@ export default class QuartzPublisherPlugin extends Plugin {
       await runShell("git", ["push", "origin", `HEAD:${this.settings.branch}`], cwd);
 
       this.settings.lastDeployedAt = Date.now();
-      this.settings.history.unshift({
-        ts: Date.now(),
-        count: copied,
-        ok: true,
-        message: `${copied}개 항목 배포`,
-      });
+      this.settings.history.unshift({ ts: Date.now(), count: copied, ok: true, message: `${copied}개 항목 배포` });
       this.settings.history = this.settings.history.slice(0, 20);
       await this.saveSettings();
 
       notice.hide();
       new Notice("✅ 배포 완료! 2~3분 후 사이트에 반영됩니다.", 6000);
     } catch (e: any) {
-      this.settings.history.unshift({
-        ts: Date.now(),
-        count: copied,
-        ok: false,
-        message: e.message || String(e),
-      });
+      this.settings.history.unshift({ ts: Date.now(), count: copied, ok: false, message: e.message || String(e) });
       this.settings.history = this.settings.history.slice(0, 20);
       await this.saveSettings();
       notice.hide();
@@ -349,9 +423,7 @@ class PublisherView extends ItemView {
     }
 
     const list = c.createEl("div", { cls: "qp-section" });
-    list.createEl("h4", {
-      text: `게시 항목 (${this.plugin.settings.published.length})`,
-    });
+    list.createEl("h4", { text: `게시 항목 (${this.plugin.settings.published.length})` });
 
     if (this.plugin.settings.published.length === 0) {
       list.createEl("div", {
@@ -362,21 +434,24 @@ class PublisherView extends ItemView {
       const ul = list.createEl("ul", { cls: "qp-list" });
       for (const p of this.plugin.settings.published) {
         const li = ul.createEl("li");
-        const isFolder = !p.includes(".") || this.app.vault.getAbstractFileByPath(p) instanceof TFolder;
+        const af = this.app.vault.getAbstractFileByPath(p);
+        const isFolder = af instanceof TFolder;
         li.createEl("span", { text: isFolder ? "📁" : "📄", cls: "qp-icon" });
         li.createEl("span", { text: p, cls: "qp-path" });
-        const btn = li.createEl("button", { text: "✕", cls: "qp-remove" });
-        btn.onclick = () => this.plugin.togglePath(p);
+
+        const linkBtn = li.createEl("a", { text: "↗", cls: "qp-open", attr: { title: "웹에서 열기" } });
+        linkBtn.href = this.plugin.buildUrl(p);
+        linkBtn.target = "_blank";
+
+        const removeBtn = li.createEl("button", { text: "✕", cls: "qp-remove", attr: { title: "게시 해제" } });
+        removeBtn.onclick = () => this.plugin.togglePath(p);
       }
     }
 
     const deployBtn = c.createEl("button", { text: "🚀 지금 배포", cls: "qp-deploy" });
     deployBtn.onclick = () => this.plugin.deploy();
 
-    const folderBtn = c.createEl("button", {
-      text: "📁 Quartz 폴더 열기",
-      cls: "qp-secondary",
-    });
+    const folderBtn = c.createEl("button", { text: "📁 Quartz 폴더 열기", cls: "qp-secondary" });
     folderBtn.onclick = () => this.plugin.openQuartzFolder();
 
     if (this.plugin.settings.history.length > 0) {
@@ -387,10 +462,7 @@ class PublisherView extends ItemView {
         const dt = new Date(h.ts);
         const icon = h.ok ? "✅" : "❌";
         li.createEl("span", { text: icon, cls: "qp-icon" });
-        li.createEl("span", {
-          text: `${dt.toLocaleString()} · ${h.message}`,
-          cls: "qp-path",
-        });
+        li.createEl("span", { text: `${dt.toLocaleString()} · ${h.message}`, cls: "qp-path" });
       }
     }
   }
@@ -410,7 +482,7 @@ class SettingsTab extends PluginSettingTab {
 
     new Setting(containerEl)
       .setName("Quartz 사이트 경로")
-      .setDesc("quartz-site 폴더의 절대 경로 (예: /Users/dunet/quartz-site)")
+      .setDesc("quartz-site 폴더의 절대 경로")
       .addText((t) =>
         t.setValue(this.plugin.settings.quartzPath).onChange(async (v) => {
           this.plugin.settings.quartzPath = v.trim();
@@ -437,18 +509,49 @@ class SettingsTab extends PluginSettingTab {
           await this.plugin.saveSettings();
         })
       );
+
+    containerEl.createEl("h3", { text: "동기화 옵션" });
+
+    new Setting(containerEl)
+      .setName("Mermaid 자동 태깅")
+      .setDesc("코드 블록이 graph/flowchart/sequenceDiagram 등으로 시작하면 자동으로 ```mermaid 태그 추가")
+      .addToggle((t) =>
+        t.setValue(this.plugin.settings.autoMermaid).onChange(async (v) => {
+          this.plugin.settings.autoMermaid = v;
+          await this.plugin.saveSettings();
+        })
+      );
+
+    new Setting(containerEl)
+      .setName("첨부파일 자동 포함")
+      .setDesc("게시한 파일이 참조하는 이미지/PDF 등 자동으로 함께 복사")
+      .addToggle((t) =>
+        t.setValue(this.plugin.settings.autoEmbeds).onChange(async (v) => {
+          this.plugin.settings.autoEmbeds = v;
+          await this.plugin.saveSettings();
+        })
+      );
+
+    new Setting(containerEl)
+      .setName("index.md 자동 생성")
+      .setDesc("게시 항목 목록을 메인 페이지로 자동 생성")
+      .addToggle((t) =>
+        t.setValue(this.plugin.settings.autoIndex).onChange(async (v) => {
+          this.plugin.settings.autoIndex = v;
+          await this.plugin.saveSettings();
+        })
+      );
   }
 }
 
-function copyDirRecursive(src: string, dst: string) {
-  fs.mkdirSync(dst, { recursive: true });
-  for (const entry of fs.readdirSync(src)) {
-    const s = path.join(src, entry);
-    const d = path.join(dst, entry);
-    const stat = fs.statSync(s);
-    if (stat.isDirectory()) copyDirRecursive(s, d);
-    else fs.copyFileSync(s, d);
-  }
+function autoTagMermaid(content: string): string {
+  return content.replace(/```(\w*)\r?\n([\s\S]*?)```/g, (match, lang, body) => {
+    if (lang) return match;
+    if (MERMAID_KEYWORDS.test(body)) {
+      return "```mermaid\n" + body + "```";
+    }
+    return match;
+  });
 }
 
 function runShell(cmd: string, args: string[], cwd: string): Promise<string> {
