@@ -1,6 +1,6 @@
 {
   "name": "obsidian-quartz-publisher",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Publish selected Obsidian files/folders via Quartz to GitHub Pages",
   "main": "main.js",
   "scripts": {

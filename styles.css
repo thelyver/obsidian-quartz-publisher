@@ -20,6 +20,15 @@
 .quartz-publisher-view .qp-secondary { width: 100%; padding: 6px; background: var(--background-modifier-border); color: var(--text-normal); border: none; border-radius: 4px; cursor: pointer; margin-top: 6px; font-size: 12px; }
 .quartz-publisher-view .qp-secondary:hover { background: var(--background-modifier-hover); }
 
+.quartz-publisher-view .qp-setup { padding: 12px; background: var(--background-secondary); border-radius: 6px; margin-top: 10px; }
+.quartz-publisher-view .qp-setup-title { font-weight: bold; font-size: 14px; margin-bottom: 8px; }
+.quartz-publisher-view .qp-setup p { font-size: 12px; color: var(--text-muted); margin: 6px 0; }
+.quartz-publisher-view .qp-setup ol { font-size: 12px; padding-left: 20px; margin: 8px 0; }
+.quartz-publisher-view .qp-setup ol li { margin: 4px 0; }
+.qp-settings-intro { background: var(--background-secondary); padding: 12px; border-radius: 6px; margin: 12px 0; font-size: 13px; }
+.qp-settings-intro p { margin: 6px 0; color: var(--text-muted); }
+.qp-settings-intro a { color: var(--text-accent); }
+
 .nav-file-title.quartz-published .nav-file-title-content::after,
 .nav-folder-title.quartz-published .nav-folder-title-content::after {
   content: " 🌐";

@@ -28,9 +28,9 @@ interface HistoryEntry {
 }
 
 const DEFAULTS: QuartzPublisherSettings = {
-  quartzPath: "/Users/dunet/quartz-site",
+  quartzPath: "",
   branch: "v4",
-  siteUrl: "https://thelyver.github.io/quartz-site/",
+  siteUrl: "",
   published: [],
   lastDeployedAt: null,
   history: [],
@@ -375,6 +375,14 @@ export default class QuartzPublisherPlugin extends Plugin {
   }
 
   async deploy() {
+    if (!this.settings.quartzPath) {
+      new Notice("⚠️ 먼저 설정에서 'Quartz 사이트 경로'를 지정하세요.", 6000);
+      return;
+    }
+    if (!fs.existsSync(this.settings.quartzPath)) {
+      new Notice(`⚠️ 경로를 찾을 수 없습니다: ${this.settings.quartzPath}`, 6000);
+      return;
+    }
     if (this.settings.published.length === 0) {
       new Notice("게시할 항목이 없습니다.");
       return;
@@ -443,13 +451,41 @@ class PublisherView extends ItemView {
 
     c.createEl("h3", { text: "🌐 Quartz Publisher" });
 
+    if (!this.plugin.settings.quartzPath) {
+      const setup = c.createEl("div", { cls: "qp-setup" });
+      setup.createEl("div", { text: "👋 첫 사용 안내", cls: "qp-setup-title" });
+      setup.createEl("p", {
+        text: "이 플러그인을 사용하려면 먼저 로컬에 Quartz v4 사이트가 준비되어 있어야 합니다.",
+      });
+      const ol = setup.createEl("ol");
+      ol.createEl("li", { text: "Quartz v4 사이트 설치 및 GitHub 연결" });
+      ol.createEl("li", { text: "아래 '설정 열기' 버튼 → Quartz 사이트 경로 / 사이트 URL 입력" });
+      ol.createEl("li", { text: "파일 탐색기에서 게시할 노트 우클릭 → 🌐 웹에 게시" });
+      const setupBtn = setup.createEl("button", { text: "⚙️ 설정 열기", cls: "qp-deploy" });
+      setupBtn.onclick = () => {
+        (this.app as any).setting.open();
+        (this.app as any).setting.openTabById("quartz-publisher");
+      };
+      const docsBtn = setup.createEl("a", {
+        text: "📖 README 보기",
+        href: "https://github.com/thelyver/obsidian-quartz-publisher",
+        cls: "qp-secondary",
+      });
+      docsBtn.target = "_blank";
+      return;
+    }
+
     const urlSec = c.createEl("div", { cls: "qp-section" });
     urlSec.createEl("div", { text: "사이트 URL", cls: "qp-label" });
-    urlSec.createEl("a", {
-      text: this.plugin.settings.siteUrl,
-      href: this.plugin.settings.siteUrl,
-      cls: "qp-link",
-    });
+    if (this.plugin.settings.siteUrl) {
+      urlSec.createEl("a", {
+        text: this.plugin.settings.siteUrl,
+        href: this.plugin.settings.siteUrl,
+        cls: "qp-link",
+      });
+    } else {
+      urlSec.createEl("div", { text: "(설정에서 입력)", cls: "qp-empty" });
+    }
 
     if (this.plugin.settings.lastDeployedAt) {
       const dt = new Date(this.plugin.settings.lastDeployedAt);
@@ -514,14 +550,43 @@ class SettingsTab extends PluginSettingTab {
     containerEl.empty();
     containerEl.createEl("h2", { text: "Quartz Publisher" });
 
+    const intro = containerEl.createEl("div", { cls: "qp-settings-intro" });
+    intro.createEl("p", {
+      text: "옵시디언 노트를 Quartz v4를 통해 GitHub Pages에 게시하는 플러그인입니다.",
+    });
+    intro.createEl("p", {
+      text: "사전 준비: 로컬에 Quartz v4 사이트가 설치되어 있고, GitHub remote 가 연결되어 있어야 합니다.",
+    });
+    const link = intro.createEl("a", {
+      text: "📖 셋업 가이드 (GitHub README)",
+      href: "https://github.com/thelyver/obsidian-quartz-publisher",
+    });
+    link.target = "_blank";
+
+    containerEl.createEl("h3", { text: "필수 설정" });
+
     new Setting(containerEl)
       .setName("Quartz 사이트 경로")
-      .setDesc("quartz-site 폴더의 절대 경로")
+      .setDesc("로컬에 설치된 quartz-site 폴더의 절대 경로 (예: /Users/me/quartz-site)")
       .addText((t) =>
-        t.setValue(this.plugin.settings.quartzPath).onChange(async (v) => {
-          this.plugin.settings.quartzPath = v.trim();
-          await this.plugin.saveSettings();
-        })
+        t.setPlaceholder("/path/to/quartz-site")
+          .setValue(this.plugin.settings.quartzPath)
+          .onChange(async (v) => {
+            this.plugin.settings.quartzPath = v.trim();
+            await this.plugin.saveSettings();
+          })
+      );
+
+    new Setting(containerEl)
+      .setName("사이트 URL")
+      .setDesc("배포된 GitHub Pages URL (예: https://username.github.io/quartz-site/)")
+      .addText((t) =>
+        t.setPlaceholder("https://username.github.io/repo/")
+          .setValue(this.plugin.settings.siteUrl)
+          .onChange(async (v) => {
+            this.plugin.settings.siteUrl = v.trim();
+            await this.plugin.saveSettings();
+          })
       );
 
     new Setting(containerEl)
@@ -530,16 +595,6 @@ class SettingsTab extends PluginSettingTab {
       .addText((t) =>
         t.setValue(this.plugin.settings.branch).onChange(async (v) => {
           this.plugin.settings.branch = v.trim() || "v4";
-          await this.plugin.saveSettings();
-        })
-      );
-
-    new Setting(containerEl)
-      .setName("사이트 URL")
-      .setDesc("배포된 GitHub Pages URL")
-      .addText((t) =>
-        t.setValue(this.plugin.settings.siteUrl).onChange(async (v) => {
-          this.plugin.settings.siteUrl = v.trim();
           await this.plugin.saveSettings();
         })
       );
