@@ -297,15 +297,34 @@ export default class QuartzPublisherPlugin extends Plugin {
   writeIndexMd(contentDir: string) {
     const grouped: Record<string, string[]> = {};
     const folders: string[] = [];
+    const featured: { path: string; title: string; description?: string }[] = [];
+
+    const collectFeatured = (filePath: string) => {
+      const af = this.app.vault.getAbstractFileByPath(filePath);
+      if (!(af instanceof TFile)) return;
+      const cache = this.app.metadataCache.getFileCache(af);
+      const fm = cache?.frontmatter;
+      if (fm && fm.featured === true) {
+        featured.push({
+          path: filePath,
+          title: fm.title || path.basename(filePath, ".md"),
+          description: fm.description,
+        });
+      }
+    };
 
     for (const p of this.settings.published) {
       const af = this.app.vault.getAbstractFileByPath(p);
       if (af instanceof TFolder) {
         folders.push(p);
+        for (const child of getAllMarkdownFilesInFolder(af)) {
+          collectFeatured(child.path);
+        }
       } else if (p.toLowerCase().endsWith(".md")) {
         const top = p.split("/")[0] || "기타";
         if (!grouped[top]) grouped[top] = [];
         grouped[top].push(p);
+        collectFeatured(p);
       }
     }
 
@@ -316,8 +335,23 @@ export default class QuartzPublisherPlugin extends Plugin {
     } else {
       md += `총 **${this.settings.published.length}개** 항목 게시됨.\n\n`;
 
+      if (featured.length > 0) {
+        md += `## ⭐ 주요 노트\n\n`;
+        for (const f of featured) {
+          const noExt = f.path.replace(/\.md$/i, "");
+          if (f.description) {
+            md += `- [[${noExt}|${f.title}]] — ${f.description}\n`;
+          } else {
+            md += `- [[${noExt}|${f.title}]]\n`;
+          }
+        }
+        md += `\n`;
+      }
+
+      md += `## 📋 게시 현황\n\n`;
+
       if (folders.length > 0) {
-        md += `## 📂 게시 폴더\n\n`;
+        md += `### 📂 게시 폴더\n\n`;
         for (const f of folders.sort()) {
           const display = path.basename(f);
           md += `- [${display}](${encodeURI(f)}/)\n`;
@@ -327,7 +361,7 @@ export default class QuartzPublisherPlugin extends Plugin {
 
       const sortedTops = Object.keys(grouped).sort();
       for (const top of sortedTops) {
-        md += `## 📁 ${top}\n\n`;
+        md += `### 📁 ${top}\n\n`;
         for (const p of grouped[top].sort()) {
           const noExt = p.replace(/\.md$/i, "");
           const displayName = path.basename(noExt);
@@ -542,6 +576,18 @@ class SettingsTab extends PluginSettingTab {
         })
       );
   }
+}
+
+function getAllMarkdownFilesInFolder(folder: TFolder): TFile[] {
+  const files: TFile[] = [];
+  for (const child of folder.children) {
+    if (child instanceof TFile && child.extension === "md") {
+      files.push(child);
+    } else if (child instanceof TFolder) {
+      files.push(...getAllMarkdownFilesInFolder(child));
+    }
+  }
+  return files;
 }
 
 function autoTagMermaid(content: string): string {
