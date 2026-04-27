@@ -188,7 +188,71 @@ cp "$QP_DEV"/{main.js,manifest.json,styles.css} "$PLUGIN_DIR/"
 # Obsidian에서 Cmd+R로 reload
 ```
 
-> **Google Drive 주의:** 동기화 중에 빌드/git 작업 시 충돌 가능성이 있음. 빌드 직전 Drive 동기화가 끝났는지 확인할 것. `node_modules/`는 `.gitignore`에 있지만 Drive에는 동기화되므로 양이 많아 첫 동기화 시 시간 소요됨.
+---
+
+## 🔗 GitHub과의 관계 (로컬 경로 이동 시 영향)
+
+**결론: 완전히 무관합니다.** 로컬 폴더를 어디로 옮기든 GitHub 작업에 영향이 없습니다.
+
+### 왜 무관한가
+- Git은 로컬 폴더의 절대 경로를 추적하지 않음 — `.git/config` 의 `remote.origin.url` 만 보고 푸시/풀.
+- 폴더를 `mv` 로 통째로 옮겨도 `.git/` 디렉토리가 함께 이동하므로 모든 history/branch/remote 설정 유지.
+- BRAT 사용자는 GitHub Releases에서 `main.js`/`manifest.json`/`styles.css` 만 받아감 → 개발자의 로컬 경로와 무관.
+- GitHub Actions (release 워크플로) 도 GitHub 서버 안에서만 돌아가므로 로컬 경로 영향 없음.
+
+### 다른 기기에서 작업 시
+새 기기에서는 단순히 다시 clone:
+```bash
+git clone https://github.com/thelyver/obsidian-quartz-publisher.git
+cd obsidian-quartz-publisher
+npm install
+```
+빌드 결과물(`main.js`)은 `.gitignore` 처리되어 있으므로 로컬에서 직접 빌드.
+
+### 영향 받는 것 (수동 업데이트 필요)
+- **문서/스크립트 안의 절대 경로 문자열** — 본 DEVELOPMENT_LOG, README, 셸 alias 등.
+- **Obsidian vault 내 플러그인 설치본** — `.obsidian/plugins/quartz-publisher/` 의 위치는 vault 안이라 그대로지만, 로컬 빌드 산출물을 복사해 넣는 명령의 source 경로가 바뀜.
+
+---
+
+## ⚠️ Google Drive 운용 주의점
+
+플러그인 소스를 Google Drive 동기화 폴더에 두면서 발생할 수 있는 이슈와 대응책.
+
+### 1. 동기화-Git 충돌
+빌드 직후 Drive가 `main.js`, `package-lock.json` 등을 클라우드로 업로드하는 동안 동시에 `git add` / `commit` / `push` 를 하면 파일 락 충돌이 드물게 발생.
+
+**대응:** 빌드 → 5초 정도 기다린 뒤 git 작업. 작업 표시줄의 Google Drive 아이콘이 회전 중이면 멈출 때까지 대기.
+
+### 2. node_modules 클라우드 용량 점유
+`.gitignore` 는 git 에만 적용되며 Google Drive에는 무시되지 않음. `node_modules/` (수백 MB) 가 그대로 동기화되어 Drive 용량 + 첫 sync 시간을 잡아먹음.
+
+**대응 옵션:**
+- (A) 무시하고 두기 — 한 번 sync 끝나면 변경 시에만 증분 업로드되어 일상 부담 적음.
+- (B) Google Drive 앱 설정에서 해당 폴더를 **"이 컴퓨터에서만"** 으로 지정해 클라우드 업로드 차단.
+- (C) `node_modules/` 를 vault 외부 경로로 심볼릭 링크 (복잡, 비권장).
+- 가장 간단한 권장: **(A) 또는 (B)**.
+
+### 3. 동기화 지연으로 인한 stale 빌드
+Drive sync가 늦어 다른 기기에서 옛 `main.js` 를 받게 되는 경우 → 다른 기기에서는 어차피 vault에 직접 복사하지 말고 BRAT으로 GitHub release를 받게 하는 게 안전.
+
+**대응:** 다중 기기 사용 시 vault에 빌드 산출물 직접 복사는 한 기기에서만 하고, 다른 기기는 BRAT 자동 업데이트에 의존.
+
+### 4. 한글 경로 + 공백 + `@` 처리
+경로에 `내 드라이브` (한글+공백), `sylver@byplot.com` 등이 들어가서 셸에서 직접 사용 시 항상 따옴표 필수:
+```bash
+cd "/Users/.../내 드라이브/..."   # OK
+cd /Users/.../내 드라이브/...     # 깨짐
+```
+`$QP_DEV` 환경변수를 alias로 두는 이유.
+
+### 5. 파일명 충돌 / 이중 인코딩
+macOS Drive 클라이언트가 가끔 NFD/NFC 한글 정규화 차이로 동기화 충돌 (`파일 (1).md` 같은 이름 생성) — 발견 즉시 수동 정리.
+
+### 6. 권장 워크플로
+- 항상 **이 기기 (개발 본진)** 에서만 빌드/release.
+- 다른 기기에서 작업할 일 생기면 GitHub에서 fresh clone (Drive 경로 재사용 X).
+- 오프라인 작업 후 sync 충돌 시 git diff/git pull 로 해결, Drive 자동 머지에 의존 X.
 
 ---
 
